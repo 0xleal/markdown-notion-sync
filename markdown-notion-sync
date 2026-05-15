@@ -2,7 +2,12 @@
 # markdown-notion-sync — sync a local Markdown tree to a Notion page hierarchy.
 #
 # Usage:
-#   markdown-notion-sync <parent-page-id> <root-dir> [--state <file>]
+#   markdown-notion-sync <parent> <root-dir> [--state <file>]
+#
+# <parent> accepts any of:
+#   - dashed UUID:    36171f7a-db20-80d1-91d1-e434429dde8b
+#   - undashed ID:    36171f7adb2080d191d1e434429dde8b
+#   - Notion URL:     https://www.notion.so/.../Some-Title-36171f7adb2080d191d1e434429dde8b
 #
 # Each .md file becomes a Notion child page. Each subdirectory becomes a folder
 # page; if the folder has a README.md, that file's content/frontmatter becomes
@@ -32,6 +37,18 @@ usage() {
   sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
 }
 
+# Accepts a Notion page ID (dashed or undashed) or a full Notion page URL.
+# Pulls the trailing 32-hex-char block and reformats it as 8-4-4-4-12.
+normalize_page_id() {
+  local input="$1" hex
+  if [[ "$input" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+    printf '%s' "$input"; return
+  fi
+  hex="$(printf '%s' "$input" | grep -oE '[0-9a-fA-F]{32}' | tail -1)"
+  [[ -n "$hex" ]] || { echo "Could not extract a Notion page ID from: $input" >&2; return 1; }
+  printf '%s-%s-%s-%s-%s' "${hex:0:8}" "${hex:8:4}" "${hex:12:4}" "${hex:16:4}" "${hex:20:12}"
+}
+
 PARENT_ID="" ROOT_DIR="" STATE_FILE=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -48,6 +65,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$PARENT_ID" && -n "$ROOT_DIR" ]] || { usage >&2; exit 2; }
+PARENT_ID="$(normalize_page_id "$PARENT_ID")" || exit 1
 [[ -d "$ROOT_DIR" ]] || { echo "Not a directory: $ROOT_DIR" >&2; exit 1; }
 ROOT_DIR="$(cd "$ROOT_DIR" && pwd)"
 STATE_FILE="${STATE_FILE:-$ROOT_DIR/.markdown-notion-sync.json}"

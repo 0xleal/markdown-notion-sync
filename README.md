@@ -5,8 +5,14 @@ page hierarchy. Folders become Notion pages; files become child pages; re-runs
 update in place.
 
 ```
-markdown-notion-sync <parent-page-id> <root-dir> [--state <file>]
+markdown-notion-sync <parent> <root-dir> [--state <file>]
 ```
+
+`<parent>` accepts any of these — paste whatever's easiest:
+
+- dashed UUID: `36171f7a-db20-80d1-91d1-e434429dde8b`
+- undashed ID: `36171f7adb2080d191d1e434429dde8b`
+- Notion URL:  `https://www.notion.so/.../Some-Title-36171f7adb2080d191d1e434429dde8b`
 
 ## What it does
 
@@ -74,7 +80,7 @@ that auth represents (`···` menu → Connections → add your integration).
 ## Example
 
 ```bash
-$ markdown-notion-sync 36171f7a-db20-80d1-91d1-e434429dde8b ./docs
+$ markdown-notion-sync https://www.notion.so/myteam/Docs-36171f7adb2080d191d1e434429dde8b ./docs
 + intro.md  →  36171f7a-db20-8198-9bf5-d998f505a1e8
 + roadmap.md  →  36171f7a-db20-81a3-bf22-c21cf4f60d44
 + engineering/  →  36171f7a-db20-81dd-8cd4-df68fbe5b5a3
@@ -83,7 +89,7 @@ $ markdown-notion-sync 36171f7a-db20-80d1-91d1-e434429dde8b ./docs
 + product/metrics.md  →  36171f7a-db20-81a1-a3c6-e159105f352b
 + product/spec.md  →  36171f7a-db20-81d3-a2af-d7d76984fc3b
 
-$ markdown-notion-sync 36171f7a-db20-80d1-91d1-e434429dde8b ./docs   # re-run
+$ markdown-notion-sync https://www.notion.so/myteam/Docs-36171f7adb2080d191d1e434429dde8b ./docs   # re-run
 ↻ intro.md
 ↻ roadmap.md
 ↻ engineering/
