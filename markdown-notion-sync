@@ -26,8 +26,7 @@
 # <root-dir>/.markdown-notion-sync.json (or --state). Re-runs use it to update in place.
 # Files renamed locally orphan the old page — clean those up manually.
 #
-# Auth: `ntn login` (keychain) or NOTION_API_TOKEN. The parent page must be
-# shared with whichever integration that auth represents.
+# Auth: `ntn login` — the official Notion CLI's OAuth flow (keychain).
 #
 # Requires: ntn (>=0.13), jq, awk.
 
@@ -76,7 +75,7 @@ done
 
 if ! ntn pages get "$PARENT_ID" >/dev/null 2>&1; then
   echo "ntn cannot read parent page $PARENT_ID." >&2
-  echo "Check auth (\`ntn login\` or NOTION_API_TOKEN) and that the page is shared with the integration." >&2
+  echo "Run \`ntn login\` and make sure the page is in the workspace you logged in to." >&2
   exit 1
 fi
 

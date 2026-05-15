@@ -60,14 +60,17 @@ When it comes from frontmatter, the H1 is left alone as a body heading.
 
 ## Auth
 
-Two options, in order of preference:
+```
+ntn login
+```
 
-1. `ntn login` — uses the OS keychain.
-2. `export NOTION_API_TOKEN=secret_…` from an internal integration created at
-   <https://www.notion.so/profile/integrations>.
+That's it. The official [Notion CLI](https://developers.notion.com/docs/cli)
+handles OAuth via the OS keychain — no token files, no environment variables,
+no manually creating an integration and pasting a secret. Big quality-of-life
+win from the Notion team; this tool just rides on top of it.
 
-Either way, **the parent page must be explicitly shared with the integration**
-that auth represents (`···` menu → Connections → add your integration).
+The parent page you sync into needs to be reachable by the workspace you
+logged in to (i.e. you can open it in your browser).
 
 ## Requirements
 
