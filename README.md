@@ -114,4 +114,4 @@ $ markdown-notion-sync 36171f7a-db20-80d1-91d1-e434429dde8b ./docs   # re-run
 
 ## License
 
-MIT or whatever you want. It's 200 lines of bash, copy what's useful.
+MIT — see [LICENSE](LICENSE).
