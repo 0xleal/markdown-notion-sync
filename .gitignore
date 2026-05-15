@@ -1,0 +1,5 @@
+# Sync state file — local-only, contains workspace-specific Notion page IDs.
+.markdown-notion-sync.json
+
+# macOS
+.DS_Store

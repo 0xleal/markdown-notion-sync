@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+# markdown-notion-sync — sync a local Markdown tree to a Notion page hierarchy.
+#
+# Usage:
+#   markdown-notion-sync <parent-page-id> <root-dir> [--state <file>]
+#
+# Each .md file becomes a Notion child page. Each subdirectory becomes a folder
+# page; if the folder has a README.md, that file's content/frontmatter becomes
+# the folder page's own body, title, and icon.
+#
+# Frontmatter (optional, YAML; recognized keys only — others ignored):
+#   ---
+#   title: Custom title          # overrides H1 / filename
+#   icon: 🧪                      # emoji icon
+#   ---
+#
+# Title resolution: frontmatter `title:` > first H1 in body > filename stem
+# (or directory name for folder pages without a README).
+#
+# State: a JSON map of relative-path → Notion page ID is written to
+# <root-dir>/.markdown-notion-sync.json (or --state). Re-runs use it to update in place.
+# Files renamed locally orphan the old page — clean those up manually.
+#
+# Auth: `ntn login` (keychain) or NOTION_API_TOKEN. The parent page must be
+# shared with whichever integration that auth represents.
+#
+# Requires: ntn (>=0.13), jq, awk.
+
+set -euo pipefail
+
+usage() {
+  sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+PARENT_ID="" ROOT_DIR="" STATE_FILE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --state)   STATE_FILE="$2"; shift 2 ;;
+    --*)       echo "Unknown option: $1" >&2; exit 2 ;;
+    *)
+      if   [[ -z "$PARENT_ID" ]]; then PARENT_ID="$1"
+      elif [[ -z "$ROOT_DIR"  ]]; then ROOT_DIR="$1"
+      else echo "Unexpected argument: $1" >&2; exit 2
+      fi
+      shift ;;
+  esac
+done
+
+[[ -n "$PARENT_ID" && -n "$ROOT_DIR" ]] || { usage >&2; exit 2; }
+[[ -d "$ROOT_DIR" ]] || { echo "Not a directory: $ROOT_DIR" >&2; exit 1; }
+ROOT_DIR="$(cd "$ROOT_DIR" && pwd)"
+STATE_FILE="${STATE_FILE:-$ROOT_DIR/.markdown-notion-sync.json}"
+
+for cmd in ntn jq awk; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "Missing dependency: $cmd" >&2; exit 1; }
+done
+
+if ! ntn pages get "$PARENT_ID" >/dev/null 2>&1; then
+  echo "ntn cannot read parent page $PARENT_ID." >&2
+  echo "Check auth (\`ntn login\` or NOTION_API_TOKEN) and that the page is shared with the integration." >&2
+  exit 1
+fi
+
+# --- state (written directly to STATE_FILE so partial progress is preserved) --
+if [[ ! -f "$STATE_FILE" ]]; then echo '{}' > "$STATE_FILE"; fi
+state_get() { jq -r --arg k "$1" '.[$k] // empty' < "$STATE_FILE"; }
+state_set() {
+  local tmp="$STATE_FILE.tmp"
+  jq --arg k "$1" --arg v "$2" '. + {($k): $v}' < "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
+}
+
+# --- frontmatter & body helpers ----------------------------------------------
+fm_value() {
+  # $1 = file, $2 = key
+  awk -v key="$2" '
+    NR==1 && $0=="---" { in_fm=1; next }
+    in_fm && $0=="---" { exit }
+    in_fm {
+      pat = "^" key ":[[:space:]]+"
+      if ($0 ~ pat) {
+        sub(pat, "")
+        gsub(/^"|"$/, "")
+        gsub(/^'\''|'\''$/, "")
+        print
+        exit
+      }
+    }
+  ' "$1"
+}
+
+first_h1() {
+  awk '
+    NR==1 && $0=="---" { in_fm=1; next }
+    in_fm && $0=="---" { in_fm=0; next }
+    !in_fm && /^# / { sub(/^# +/, ""); print; exit }
+  ' "$1"
+}
+
+# render_body <file> [strip_h1]
+#   Emits the file body with YAML frontmatter removed. If strip_h1 is set,
+#   also removes the first H1 line and the single blank line that follows it.
+render_body() {
+  awk -v strip="${2:-}" '
+    BEGIN { in_fm=0; fm_seen=0; h1_done=0; blank_done=0 }
+    NR==1 && $0=="---" { in_fm=1; fm_seen=1; next }
+    in_fm && $0=="---" { in_fm=0; next }
+    in_fm { next }
+    {
+      if (strip=="strip_h1" && !h1_done && /^# /) { h1_done=1; next }
+      if (strip=="strip_h1" && h1_done && !blank_done && /^$/) { blank_done=1; next }
+      print
+    }
+  ' "$1"
+}
+
+# --- Notion API ---------------------------------------------------------------
+patch_page() {
+  local page_id="$1" title="$2" icon="${3:-}"
+  local body
+  if [[ -n "$icon" ]]; then
+    body="$(jq -n --arg t "$title" --arg e "$icon" '{
+      icon: {type:"emoji", emoji:$e},
+      properties: {title: {title: [{type:"text", text:{content:$t}}]}}
+    }')"
+  else
+    body="$(jq -n --arg t "$title" '{
+      properties: {title: {title: [{type:"text", text:{content:$t}}]}}
+    }')"
+  fi
+  ntn api "/v1/pages/$page_id" -X PATCH -d "$body" </dev/null >/dev/null
+}
+
+create_page() {
+  # $1 = parent_id, $2 = body (may be empty), $3 = title (used only when body is empty)
+  local parent_id="$1" body="$2" title="${3:-Untitled}" id
+  if [[ -n "$body" ]]; then
+    id="$(printf '%s' "$body" | ntn pages create --parent "page:$parent_id" --json | jq -r '.id')"
+  else
+    # ntn pages create rejects empty markdown; fall back to the raw API so we
+    # can create a page with no body blocks (used for folder pages w/o README).
+    local payload
+    payload="$(jq -n --arg pid "$parent_id" --arg t "$title" '{
+      parent: {type:"page_id", page_id:$pid},
+      properties: {title: {title: [{type:"text", text:{content:$t}}]}}
+    }')"
+    id="$(ntn api /v1/pages -X POST -d "$payload" </dev/null | jq -r '.id')"
+  fi
+  [[ -n "$id" && "$id" != "null" ]] || { echo "create_page failed under $parent_id" >&2; exit 1; }
+  printf '%s' "$id"
+}
+
+update_page() {
+  local page_id="$1" body="$2"
+  printf '%s' "$body" | ntn pages update "$page_id" >/dev/null
+}
+
+# --- sync core ---------------------------------------------------------------
+resolve_from_file() {
+  # $1 = path, $2 = fallback_stem
+  # Prints: title<TAB>title_source<TAB>icon
+  local path="$1" fallback="$2" t src icon
+  t="$(fm_value "$path" title)"
+  if [[ -n "$t" ]]; then src="fm"
+  else
+    t="$(first_h1 "$path")"
+    if [[ -n "$t" ]]; then src="h1"
+    else t="$fallback"; src="stem"; fi
+  fi
+  icon="$(fm_value "$path" icon)"
+  printf '%s\t%s\t%s' "$t" "$src" "$icon"
+}
+
+# Create or update a single Markdown file. Prints the page id.
+sync_file() {
+  local rel="$1" parent_id="$2" path="$3"
+  local stem="${rel##*/}"; stem="${stem%.md}"
+  local title title_source icon body strip=""
+  IFS=$'\t' read -r title title_source icon <<<"$(resolve_from_file "$path" "$stem")"
+  [[ "$title_source" == "h1" ]] && strip="strip_h1"
+  body="$(render_body "$path" "$strip")"
+
+  local existing page_id
+  existing="$(state_get "$rel")"
+  if [[ -n "$existing" ]]; then
+    page_id="$existing"
+    update_page "$page_id" "$body"
+    echo "↻ $rel" >&2
+  else
+    page_id="$(create_page "$parent_id" "$body" "$title")"
+    state_set "$rel" "$page_id"
+    echo "+ $rel  →  $page_id" >&2
+  fi
+  patch_page "$page_id" "$title" "$icon"
+  printf '%s' "$page_id"
+}
+
+# Sync a directory. Two-pass:
+#   1. Ensure the folder's own page exists (empty body on first create), set title+icon.
+#   2. Recurse into children, collecting their page ids.
+#   3. If the folder has a README, rewrite the folder body as README + <page url="..">
+#      tags for each child — the tags tell the API not to delete those child pages.
+# Prints the folder page id (or the unchanged parent_id at root).
+sync_dir() {
+  local abs_dir="$1" parent_id="$2" rel_prefix="$3"
+  local self_id="$parent_id"
+  local readme="" readme_strip=""
+
+  # Phase 1: ensure folder page exists.
+  if [[ -n "$rel_prefix" ]]; then
+    local stem; stem="$(basename "$abs_dir")"
+    local title icon title_source
+    if [[ -f "$abs_dir/README.md" ]]; then
+      readme="$abs_dir/README.md"
+      IFS=$'\t' read -r title title_source icon <<<"$(resolve_from_file "$readme" "$stem")"
+      [[ "$title_source" == "h1" ]] && readme_strip="strip_h1"
+    else
+      title="$stem"; icon=""
+    fi
+
+    local existing
+    existing="$(state_get "$rel_prefix")"
+    if [[ -n "$existing" ]]; then
+      self_id="$existing"
+      echo "↻ $rel_prefix/" >&2
+    else
+      self_id="$(create_page "$parent_id" "" "$title")"
+      state_set "$rel_prefix" "$self_id"
+      echo "+ $rel_prefix/  →  $self_id" >&2
+    fi
+    patch_page "$self_id" "$title" "$icon"
+  fi
+
+  # Phase 2: recurse, collecting child page ids in document order.
+  local -a child_ids=()
+  local cid
+  while IFS= read -r -d '' f; do
+    local base; base="$(basename "$f")"
+    [[ "$base" == "README.md" || "$base" == .* ]] && continue
+    local rel="${rel_prefix}${rel_prefix:+/}$base"
+    cid="$(sync_file "$rel" "$self_id" "$f")"
+    child_ids+=( "$cid" )
+  done < <(find "$abs_dir" -maxdepth 1 -mindepth 1 -type f -name '*.md' -print0 | sort -z)
+
+  while IFS= read -r -d '' d; do
+    local base; base="$(basename "$d")"
+    [[ "$base" == .* ]] && continue
+    local rel="${rel_prefix}${rel_prefix:+/}$base"
+    cid="$(sync_dir "$d" "$self_id" "$rel")"
+    child_ids+=( "$cid" )
+  done < <(find "$abs_dir" -maxdepth 1 -mindepth 1 -type d -print0 | sort -z)
+
+  # Phase 3: rewrite folder body if a README is present. Append <page url=".."> for
+  # each child so the API preserves them; without these refs it would 400 to avoid
+  # silent deletion of nested pages.
+  if [[ -n "$rel_prefix" && -n "$readme" ]]; then
+    local body
+    body="$(render_body "$readme" "$readme_strip")"
+    local id url
+    for id in "${child_ids[@]}"; do
+      url="https://www.notion.so/${id//-/}"
+      body+=$'\n'"<page url=\"$url\"></page>"
+    done
+    update_page "$self_id" "$body"
+  fi
+
+  printf '%s' "$self_id"
+}
+
+sync_dir "$ROOT_DIR" "$PARENT_ID" "" >/dev/null
+echo "Done. State at $STATE_FILE" >&2
